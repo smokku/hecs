@@ -60,7 +60,7 @@ impl<'a> EntityRef<'a> {
     /// let a = world.spawn((123, true, "abc"));
     /// // The returned query must outlive the borrow made by `get`
     /// let mut query = world.entity(a).unwrap().query::<(&mut i32, &bool)>();
-    /// let (number, flag) = query.get().unwrap();
+    /// let (mut number, flag) = query.get().unwrap();
     /// if *flag { *number *= 2; }
     /// assert_eq!(*number, 246);
     /// ```
@@ -142,6 +142,7 @@ pub struct RefMut<'a, T: Component> {
     /// State index for `T` in `archetype`
     state: usize,
     target: NonNull<T>,
+    mutated: &'a mut bool,
 }
 
 impl<'a, T: Component> RefMut<'a, T> {
@@ -155,10 +156,12 @@ impl<'a, T: Component> RefMut<'a, T> {
         let target =
             NonNull::new_unchecked(archetype.get_base::<T>(state).as_ptr().add(index as usize));
         archetype.borrow_mut::<T>(state);
+        let mutated = &mut *archetype.get_mutated(state).as_ptr().add(index as usize);
         Ok(Self {
             archetype,
             state,
             target,
+            mutated,
         })
     }
 }
@@ -181,6 +184,7 @@ impl<'a, T: Component> Deref for RefMut<'a, T> {
 
 impl<'a, T: Component> DerefMut for RefMut<'a, T> {
     fn deref_mut(&mut self) -> &mut T {
+        *self.mutated = true;
         unsafe { self.target.as_mut() }
     }
 }

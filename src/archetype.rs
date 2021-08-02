@@ -68,6 +68,8 @@ impl Archetype {
                 .map(|_| Data {
                     state: AtomicBorrow::new(),
                     storage: NonNull::new(max_align as *mut u8).unwrap(),
+                    mutated_entities: Vec::new(),
+                    added_entities: Vec::new(),
                 })
                 .collect(),
             remove_edges: HashMap::default(),
@@ -99,6 +101,50 @@ impl Archetype {
     /// Find the state index associated with `T`, if present
     pub(crate) fn get_state<T: Component>(&self) -> Option<usize> {
         self.index.get(&TypeId::of::<T>()).copied()
+    }
+
+    /// Find the state index associated with `TypeId`, if present
+    pub(crate) fn get_state_by_id(&self, id: &TypeId) -> Option<usize> {
+        self.index.get(id).copied()
+    }
+
+    #[allow(missing_docs)]
+    #[inline]
+    pub(crate) fn get_mutated(&self, state: usize) -> NonNull<bool> {
+        unsafe {
+            NonNull::new_unchecked(
+                self.data.get_unchecked(state).mutated_entities.as_ptr() as *mut bool
+            )
+        }
+    }
+
+    #[allow(missing_docs)]
+    #[inline]
+    pub(crate) fn get_added(&self, state: usize) -> NonNull<bool> {
+        unsafe {
+            NonNull::new_unchecked(
+                self.data.get_unchecked(state).added_entities.as_ptr() as *mut bool
+            )
+        }
+    }
+
+    pub(crate) fn clear_trackers<T: Component>(&mut self) {
+        if let Some(state) = self.get_state::<T>() {
+            unsafe {
+                for mutated in self
+                    .data
+                    .get_unchecked_mut(state)
+                    .mutated_entities
+                    .iter_mut()
+                {
+                    *mutated = false;
+                }
+
+                for added in self.data.get_unchecked_mut(state).added_entities.iter_mut() {
+                    *added = false;
+                }
+            }
+        }
     }
 
     /// Get the address of the first `T` component using an index from `get_state::<T>`
@@ -264,7 +310,7 @@ impl Archetype {
             let new_data = self
                 .types
                 .iter()
-                .zip(&*self.data)
+                .zip(&mut *self.data)
                 .map(|(info, old)| {
                     let storage = if info.layout.size() == 0 {
                         NonNull::new(info.layout.align() as *mut u8).unwrap()
@@ -293,9 +339,15 @@ impl Archetype {
                         }
                         NonNull::new(mem).unwrap()
                     };
+                    let mut mutated_entities = old.mutated_entities.split_off(0);
+                    mutated_entities.resize_with(new_cap, || false);
+                    let mut added_entities = old.added_entities.split_off(0);
+                    added_entities.resize_with(new_cap, || true);
                     Data {
                         state: AtomicBorrow::new(), // &mut self guarantees no outstanding borrows
                         storage,
+                        mutated_entities,
+                        added_entities,
                     }
                 })
                 .collect::<Box<[_]>>();
@@ -307,7 +359,7 @@ impl Archetype {
     /// Returns the ID of the entity moved into `index`, if any
     pub(crate) unsafe fn remove(&mut self, index: u32, drop: bool) -> Option<u32> {
         let last = self.len - 1;
-        for (ty, data) in self.types.iter().zip(&*self.data) {
+        for (ty, data) in self.types.iter().zip(&mut *self.data) {
             let removed = data.storage.as_ptr().add(index as usize * ty.layout.size());
             if drop {
                 (ty.drop)(removed);
@@ -315,6 +367,8 @@ impl Archetype {
             if index != last {
                 let moved = data.storage.as_ptr().add(last as usize * ty.layout.size());
                 ptr::copy_nonoverlapping(moved, removed, ty.layout.size());
+                data.mutated_entities[index as usize] = data.mutated_entities[last as usize];
+                data.added_entities[index as usize] = data.added_entities[last as usize];
             }
         }
         self.len = last;
@@ -330,15 +384,19 @@ impl Archetype {
     pub(crate) unsafe fn move_to(
         &mut self,
         index: u32,
-        mut f: impl FnMut(*mut u8, TypeId, usize),
+        mut f: impl FnMut(*mut u8, TypeId, usize, bool, bool),
     ) -> Option<u32> {
         let last = self.len - 1;
-        for (ty, data) in self.types.iter().zip(&*self.data) {
+        for (ty, data) in self.types.iter().zip(&mut *self.data) {
             let moved_out = data.storage.as_ptr().add(index as usize * ty.layout.size());
-            f(moved_out, ty.id(), ty.layout().size());
+            let is_added = data.added_entities[index as usize];
+            let is_mutated = data.mutated_entities[index as usize];
+            f(moved_out, ty.id(), ty.layout().size(), is_added, is_mutated);
             if index != last {
                 let moved = data.storage.as_ptr().add(last as usize * ty.layout.size());
                 ptr::copy_nonoverlapping(moved, moved_out, ty.layout.size());
+                data.added_entities[index as usize] = data.added_entities[last as usize];
+                data.mutated_entities[index as usize] = data.mutated_entities[last as usize];
             }
         }
         self.len -= 1;
@@ -356,7 +414,16 @@ impl Archetype {
         ty: TypeId,
         size: usize,
         index: u32,
+        added: bool,
+        mutated: bool,
     ) {
+        let data = self.data.get_unchecked_mut(*self.index.get(&ty).unwrap());
+        if added {
+            data.added_entities[index as usize] = true;
+        }
+        if mutated {
+            data.mutated_entities[index as usize] = true;
+        }
         let ptr = self
             .get_dynamic(ty, size, index)
             .unwrap()
@@ -426,6 +493,8 @@ impl Drop for Archetype {
 struct Data {
     state: AtomicBorrow,
     storage: NonNull<u8>,
+    mutated_entities: Vec<bool>,
+    added_entities: Vec<bool>,
 }
 
 /// A hasher optimized for hashing a single TypeId.

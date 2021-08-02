@@ -1,156 +1,216 @@
-use core::{
-    any::TypeId,
-    marker::PhantomData,
-    ops::{Deref, DerefMut},
-};
+use core::{any::TypeId, marker::PhantomData, ptr::NonNull};
 
 use crate::{Access, Archetype, Component, Fetch, Query};
 
-/// Query that tracks mutable access to a component
+/// Query that retrieves mutation state of type `T` component.
+/// Added components do not count as mutated.
 ///
-/// Using this in a query is equivalent to `(&mut T, &mut Modified<T>)`, except that it yields a
-/// smart pointer to `T` which sets the flag inside `Modified<T>` to `true` when it's mutably
-/// borrowed.
-///
-/// A `Modified<T>` component must exist on an entity for it to be exposed to this query.
+/// It is your responsibility to clear trackers with [`World::clear_trackers::<T>()`](crate::World::clear_trackers::<T>())
+/// at the start of the frame (or any other suitable moment).
 ///
 /// # Example
 /// ```
 /// # use hecs::*;
 /// let mut world = World::new();
-/// let e = world.spawn((123, Modified::<i32>::new()));
-/// for (_id, mut value) in world.query::<Tracked<i32>>().iter() {
-///   assert_eq!(*value, 123);
+/// let e = world.spawn((123,));
+/// for (_id, (value, value_mut)) in world.query::<(&i32, Mutated<i32>)>().iter() {
+///   assert_eq!(*value, 123, "!1");
+///   assert_eq!(value_mut, false, "!2");
 /// }
-/// assert!(!world.get::<Modified<i32>>(e).unwrap().is_set());
-/// for (_id, mut value) in world.query::<Tracked<i32>>().iter() {
+/// for (_id, mut value) in world.query::<&mut i32>().iter() {
 ///   *value = 42;
 /// }
-/// assert!(world.get::<Modified<i32>>(e).unwrap().is_set());
+/// for (_id, (value, value_mut)) in world.query::<(&i32, Mutated<i32>)>().iter() {
+///   assert_eq!(*value, 42, "!3");
+///   assert_eq!(value_mut, true, "!3a");
+/// }
+/// world.clear_trackers::<i32>();
+/// for (_id, value_mut) in world.query::<Mutated<i32>>().iter() {
+///   assert_eq!(value_mut, false, "!4");
+/// }
 /// ```
-pub struct Tracked<'a, T: Component> {
-    value: &'a mut T,
-    modified: &'a mut Modified<T>,
-}
+pub struct Mutated<T>(PhantomData<fn(T)>);
 
-impl<'a, T: Component> Deref for Tracked<'a, T> {
-    type Target = T;
-    #[inline]
-    fn deref(&self) -> &T {
-        self.value
-    }
-}
-
-impl<'a, T: Component> DerefMut for Tracked<'a, T> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut T {
-        self.modified.0 = true;
-        self.value
-    }
-}
-
-impl<'a, T: Component> Query for Tracked<'a, T> {
-    type Fetch = FetchTracked<T>;
-}
-
-/// A flag indicating whether the `T` component was modified
-///
-/// Must be manually added to components that will be queried with `Tracked`.
-pub struct Modified<T>(bool, PhantomData<T>);
-
-impl<T> Modified<T> {
-    /// Constructs an unset flag
-    #[inline]
-    pub fn new() -> Self {
-        Self(false, PhantomData)
-    }
-
-    /// Returns whether the `T` component was modified since the last `unset` call
-    #[inline]
-    pub fn is_set(&self) -> bool {
-        self.0
-    }
-
-    /// Unsets the flag
-    #[inline]
-    pub fn unset(&mut self) {
-        self.0 = false;
-    }
-}
-
-impl<T> Default for Modified<T> {
-    #[inline]
-    fn default() -> Self {
-        Self::new()
-    }
+impl<T: Component> Query for Mutated<T> {
+    type Fetch = FetchMutated<T>;
 }
 
 #[doc(hidden)]
-pub struct FetchTracked<T: Component> {
-    value: <&'static mut T as Query>::Fetch,
-    modified: <&'static mut Modified<T> as Query>::Fetch,
-}
+pub struct FetchMutated<T>(NonNull<bool>, PhantomData<fn(T)>);
 
-unsafe impl<'a, T: Component> Fetch<'a> for FetchTracked<T> {
-    type Item = Tracked<'a, T>;
+unsafe impl<'a, T: Component> Fetch<'a> for FetchMutated<T> {
+    type Item = bool;
 
-    type State = (
-        <<&'a mut T as Query>::Fetch as Fetch<'a>>::State,
-        <<&'a mut Modified<T> as Query>::Fetch as Fetch<'a>>::State,
-    );
+    type State = usize;
 
     fn dangling() -> Self {
-        Self {
-            value: <<&'a mut T as Query>::Fetch as Fetch<'a>>::dangling(),
-            modified: <<&'a mut Modified<T> as Query>::Fetch as Fetch<'a>>::dangling(),
-        }
+        Self(NonNull::dangling(), PhantomData)
     }
 
     fn access(archetype: &Archetype) -> Option<Access> {
-        Some(
-            <&'a mut T as Query>::Fetch::access(archetype)?
-                .max(<&'a mut Modified<T> as Query>::Fetch::access(archetype)?),
-        )
+        if archetype.has::<T>() {
+            Some(Access::Read)
+        } else {
+            None
+        }
     }
 
-    fn borrow(archetype: &Archetype, state: Self::State) {
-        <&'a mut T as Query>::Fetch::borrow(archetype, state.0);
-        <&'a mut Modified<T> as Query>::Fetch::borrow(archetype, state.1);
-    }
+    fn borrow(_archetype: &Archetype, _state: Self::State) {}
     fn prepare(archetype: &Archetype) -> Option<Self::State> {
-        if !archetype.has::<T>() {
-            return None;
-        }
-        if !archetype.has::<Modified<T>>() {
-            return None;
-        }
-        Some((
-            <&'a mut T as Query>::Fetch::prepare(archetype)?,
-            <&'a mut Modified<T> as Query>::Fetch::prepare(archetype)?,
-        ))
+        archetype.get_state::<T>()
     }
     fn execute(archetype: &'a Archetype, state: Self::State) -> Self {
-        Self {
-            value: <<&'a mut T as Query>::Fetch as Fetch<'a>>::execute(archetype, state.0),
-            modified: <<&'a mut Modified<T> as Query>::Fetch as Fetch<'a>>::execute(
-                archetype, state.1,
-            ),
-        }
+        Self(archetype.get_mutated(state), PhantomData)
     }
-    fn release(archetype: &Archetype, state: Self::State) {
-        <&'a mut T as Query>::Fetch::release(archetype, state.0);
-        <&'a mut Modified<T> as Query>::Fetch::release(archetype, state.1);
-    }
+    fn release(_archetype: &Archetype, _state: Self::State) {}
 
     fn for_each_borrow(mut f: impl FnMut(TypeId, bool)) {
-        <&'a mut T as Query>::Fetch::for_each_borrow(|t, b| f(t, b));
-        <&'a mut Modified<T> as Query>::Fetch::for_each_borrow(|t, b| f(t, b));
+        f(TypeId::of::<T>(), false);
     }
 
     unsafe fn get(&self, n: usize) -> Self::Item {
-        Tracked {
-            value: self.value.get(n),
-            modified: self.modified.get(n),
+        *self.0.as_ptr().add(n)
+    }
+}
+
+/// Query that retrieves added state of type `T` component.
+///
+/// It is your responsibility to clear trackers with [`World::clear_trackers::<T>()`](crate::World::clear_trackers::<T>())
+/// at the start of the frame (or any other suitable moment).
+///
+/// # Example
+/// ```
+/// # use hecs::*;
+/// let mut world = World::new();
+/// let e = world.spawn((123,));
+/// for (_id, (value, value_add)) in world.query::<(&i32, Added<i32>)>().iter() {
+///   assert_eq!(*value, 123);
+///   assert_eq!(value_add, true);
+/// }
+/// world.clear_trackers::<i32>();
+/// for (_id, value_add) in world.query::<Added<i32>>().iter() {
+///   assert_eq!(value_add, false);
+/// }
+/// ```
+pub struct Added<T>(PhantomData<fn(T)>);
+
+impl<T: Component> Query for Added<T> {
+    type Fetch = FetchAdded<T>;
+}
+
+#[doc(hidden)]
+pub struct FetchAdded<T>(NonNull<bool>, PhantomData<fn(T)>);
+
+unsafe impl<'a, T: Component> Fetch<'a> for FetchAdded<T> {
+    type Item = bool;
+
+    type State = usize;
+
+    fn dangling() -> Self {
+        Self(NonNull::dangling(), PhantomData)
+    }
+
+    fn access(archetype: &Archetype) -> Option<Access> {
+        if archetype.has::<T>() {
+            Some(Access::Read)
+        } else {
+            None
         }
+    }
+
+    fn borrow(_archetype: &Archetype, _state: Self::State) {}
+    fn prepare(archetype: &Archetype) -> Option<Self::State> {
+        archetype.get_state::<T>()
+    }
+    fn execute(archetype: &'a Archetype, state: Self::State) -> Self {
+        Self(archetype.get_added(state), PhantomData)
+    }
+    fn release(_archetype: &Archetype, _state: Self::State) {}
+
+    fn for_each_borrow(mut f: impl FnMut(TypeId, bool)) {
+        f(TypeId::of::<T>(), false);
+    }
+
+    unsafe fn get(&self, n: usize) -> Self::Item {
+        *self.0.as_ptr().add(n)
+    }
+}
+
+/// Query that retrieves changed state of type `T` component.
+/// Changed component is one that have either been mutated or added.
+///
+/// It is your responsibility to clear trackers with [`World::clear_trackers::<T>()`](crate::World::clear_trackers::<T>())
+/// at the start of the frame (or any other suitable moment).
+///
+/// # Example
+/// ```
+/// # use hecs::*;
+/// let mut world = World::new();
+/// let e = world.spawn((123,));
+/// for (_id, (value, value_ch)) in world.query::<(&i32, Changed<i32>)>().iter() {
+///   assert_eq!(*value, 123);
+///   assert_eq!(value_ch, true);
+/// }
+/// world.clear_trackers::<i32>();
+/// for (_id, value_ch) in world.query::<Changed<i32>>().iter() {
+///   assert_eq!(value_ch, false);
+/// }
+/// for (_id, mut value) in world.query::<&mut i32>().iter() {
+///   *value = 42;
+/// }
+/// for (_id, (value, value_ch)) in world.query::<(&i32, Changed<i32>)>().iter() {
+///   assert_eq!(*value, 42);
+///   assert_eq!(value_ch, true);
+/// }
+/// world.clear_trackers::<i32>();
+/// for (_id, value_ch) in world.query::<Changed<i32>>().iter() {
+///   assert_eq!(value_ch, false);
+/// }
+/// ```
+pub struct Changed<T>(PhantomData<fn(T)>);
+
+impl<T: Component> Query for Changed<T> {
+    type Fetch = FetchChanged<T>;
+}
+
+#[doc(hidden)]
+pub struct FetchChanged<T>(NonNull<bool>, NonNull<bool>, PhantomData<fn(T)>);
+
+unsafe impl<'a, T: Component> Fetch<'a> for FetchChanged<T> {
+    type Item = bool;
+
+    type State = usize;
+
+    fn dangling() -> Self {
+        Self(NonNull::dangling(), NonNull::dangling(), PhantomData)
+    }
+
+    fn access(archetype: &Archetype) -> Option<Access> {
+        if archetype.has::<T>() {
+            Some(Access::Read)
+        } else {
+            None
+        }
+    }
+
+    fn borrow(_archetype: &Archetype, _state: Self::State) {}
+    fn prepare(archetype: &Archetype) -> Option<Self::State> {
+        archetype.get_state::<T>()
+    }
+    fn execute(archetype: &'a Archetype, state: Self::State) -> Self {
+        Self(
+            archetype.get_mutated(state),
+            archetype.get_added(state),
+            PhantomData,
+        )
+    }
+    fn release(_archetype: &Archetype, _state: Self::State) {}
+
+    fn for_each_borrow(mut f: impl FnMut(TypeId, bool)) {
+        f(TypeId::of::<T>(), false);
+    }
+
+    unsafe fn get(&self, n: usize) -> Self::Item {
+        *self.0.as_ptr().add(n) || *self.1.as_ptr().add(n)
     }
 }

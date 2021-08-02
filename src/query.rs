@@ -8,6 +8,7 @@
 use core::any::TypeId;
 use core::marker::PhantomData;
 use core::mem;
+use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 use core::slice::Iter as SliceIter;
 
@@ -121,20 +122,62 @@ unsafe impl<'a, T: Component> Fetch<'a> for FetchRead<T> {
     }
 }
 
+/// Unique borrow of an entity's component
+pub struct Mut<'a, T: Component> {
+    pub(crate) value: &'a mut T,
+    pub(crate) mutated: &'a mut bool,
+}
+
+impl<'a, T: Component> Mut<'a, T> {
+    /// Creates a new mutable reference to a component. This is unsafe because the index bounds are not checked.
+    ///
+    /// # Safety
+    /// This doesn't check the bounds of index in archetype
+    pub unsafe fn new(value: &'a mut T, mutated: &'a mut bool) -> Self {
+        Mut { value, mutated }
+    }
+}
+
+unsafe impl<T: Component> Send for Mut<'_, T> {}
+unsafe impl<T: Component> Sync for Mut<'_, T> {}
+
+impl<'a, T: Component> Deref for Mut<'a, T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<'a, T: Component> DerefMut for Mut<'a, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        *self.mutated = true;
+        self.value
+    }
+}
+
+impl<'a, T: Component + core::fmt::Debug> core::fmt::Debug for Mut<'a, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
 impl<'a, T: Component> Query for &'a mut T {
     type Fetch = FetchWrite<T>;
 }
 
 #[doc(hidden)]
-pub struct FetchWrite<T>(NonNull<T>);
+pub struct FetchWrite<T>(NonNull<T>, NonNull<bool>);
 
 unsafe impl<'a, T: Component> Fetch<'a> for FetchWrite<T> {
-    type Item = &'a mut T;
+    type Item = Mut<'a, T>;
 
     type State = usize;
 
     fn dangling() -> Self {
-        Self(NonNull::dangling())
+        Self(NonNull::dangling(), NonNull::dangling())
     }
 
     fn access(archetype: &Archetype) -> Option<Access> {
@@ -153,7 +196,7 @@ unsafe impl<'a, T: Component> Fetch<'a> for FetchWrite<T> {
         Some(archetype.get_state::<T>()?)
     }
     fn execute(archetype: &'a Archetype, state: Self::State) -> Self {
-        Self(archetype.get_base::<T>(state))
+        Self(archetype.get_base::<T>(state), archetype.get_mutated(state))
     }
     fn release(archetype: &Archetype, state: Self::State) {
         archetype.release_mut::<T>(state);
@@ -164,7 +207,7 @@ unsafe impl<'a, T: Component> Fetch<'a> for FetchWrite<T> {
     }
 
     unsafe fn get(&self, n: usize) -> Self::Item {
-        &mut *self.0.as_ptr().add(n)
+        Mut::new(&mut *self.0.as_ptr().add(n), &mut *self.1.as_ptr().add(n))
     }
 }
 

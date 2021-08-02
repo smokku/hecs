@@ -24,7 +24,7 @@
 //! let a = world.spawn((123, true, "abc"));
 //! let b = world.spawn((42, false));
 //! // Systems can be simple for loops
-//! for (id, (number, &flag)) in world.query_mut::<(&mut i32, &bool)>() {
+//! for (id, (mut number, &flag)) in world.query_mut::<(&mut i32, &bool)>() {
 //!   if flag { *number *= 2; }
 //! }
 //! // Random access is simple and safe
@@ -81,7 +81,7 @@ pub use query::{
     QueryBorrow, QueryItem, QueryIter, QueryMut, With, Without,
 };
 pub use query_one::QueryOne;
-pub use tracked::{Modified, Tracked};
+pub use tracked::{Added, Changed, Mutated};
 pub use world::{
     ArchetypesGeneration, Component, ComponentError, Iter, QueryOneError, SpawnBatchIter,
     SpawnColumnBatchIter, World,

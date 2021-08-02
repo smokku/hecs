@@ -109,6 +109,19 @@ impl Archetype {
         }
     }
 
+    /// Get the `TypeState of `T` component using an index from `get_state::<T>`
+    pub(crate) fn get_type_state<T: Component>(&self, state: usize) -> &TypeState {
+        let (id, state) = self.state.get_from_index(state);
+        assert_eq!(id, &TypeId::of::<T>());
+
+        state
+    }
+
+    /// Get mutable `TypeState of `T` component using an index from `get_state::<T>`
+    pub(crate) fn get_type_state_mut(&mut self, id: &TypeId) -> Option<&mut TypeState> {
+        self.state.get_mut(id)
+    }
+
     /// Get the `T` components of these entities, if present
     ///
     /// Useful for efficient serialization.
@@ -262,8 +275,12 @@ impl Archetype {
             self.entities = new_entities;
 
             let old_data_size = mem::replace(&mut self.data_size, 0);
-            let mut new_state =
-                OrderedTypeIdMap::new(self.types.iter().map(|ty| (ty.id, TypeState::new(0))));
+            let mut new_state = OrderedTypeIdMap::new(self.types.iter().map(|ty| {
+                let mut type_state = TypeState::new(0);
+                type_state.mutated_entities.resize_with(new_cap, || false);
+                type_state.added_entities.resize_with(new_cap, || false);
+                (ty.id, type_state)
+            }));
             for ty in &self.types {
                 self.data_size = align(self.data_size, ty.layout.align());
                 new_state.get_mut(&ty.id).unwrap().offset = self.data_size;
@@ -321,6 +338,12 @@ impl Archetype {
                     removed,
                     ty.layout.size(),
                 );
+
+                let type_state = self.state.get_mut(&ty.id).unwrap();
+                type_state.mutated_entities[index as usize] =
+                    type_state.mutated_entities[last as usize];
+                type_state.added_entities[index as usize] =
+                    type_state.added_entities[last as usize];
             }
         }
         self.len = last;
@@ -336,7 +359,7 @@ impl Archetype {
     pub(crate) unsafe fn move_to(
         &mut self,
         index: u32,
-        mut f: impl FnMut(*mut u8, TypeId, usize),
+        mut f: impl FnMut(*mut u8, TypeId, usize, bool, bool),
     ) -> Option<u32> {
         let last = self.len - 1;
         for ty in &self.types {
@@ -344,7 +367,10 @@ impl Archetype {
                 .get_dynamic(ty.id, ty.layout.size(), index)
                 .unwrap()
                 .as_ptr();
-            f(moved, ty.id(), ty.layout().size());
+            let type_state = self.state.get(&ty.id).unwrap();
+            let is_added = type_state.added_entities[index as usize];
+            let is_mutated = type_state.mutated_entities[index as usize];
+            f(moved, ty.id(), ty.layout().size(), is_added, is_mutated);
             if index != last {
                 ptr::copy_nonoverlapping(
                     self.get_dynamic(ty.id, ty.layout.size(), last)
@@ -353,6 +379,11 @@ impl Archetype {
                     moved,
                     ty.layout.size(),
                 );
+                let type_state = self.state.get_mut(&ty.id).unwrap();
+                type_state.added_entities[index as usize] =
+                    type_state.added_entities[last as usize];
+                type_state.mutated_entities[index as usize] =
+                    type_state.mutated_entities[last as usize];
             }
         }
         self.len -= 1;
@@ -370,7 +401,16 @@ impl Archetype {
         ty: TypeId,
         size: usize,
         index: u32,
+        added: bool,
+        mutated: bool,
     ) {
+        let state = self.state.get_mut(&ty).unwrap();
+        if added {
+            state.added_entities[index as usize] = true;
+        }
+        if mutated {
+            state.mutated_entities[index as usize] = true;
+        }
         let ptr = self
             .get_dynamic(ty, size, index)
             .unwrap()
@@ -507,9 +547,11 @@ impl<V> OrderedTypeIdMap<V> {
     }
 }
 
-struct TypeState {
+pub(crate) struct TypeState {
     offset: usize,
     borrow: AtomicBorrow,
+    mutated_entities: Vec<bool>,
+    added_entities: Vec<bool>,
 }
 
 impl TypeState {
@@ -517,7 +559,31 @@ impl TypeState {
         Self {
             offset,
             borrow: AtomicBorrow::new(),
+            mutated_entities: Vec::new(),
+            added_entities: Vec::new(),
         }
+    }
+
+    pub(crate) fn clear_trackers(&mut self) {
+        for mutated in self.mutated_entities.iter_mut() {
+            *mutated = false;
+        }
+
+        for added in self.added_entities.iter_mut() {
+            *added = false;
+        }
+    }
+
+    #[allow(missing_docs)]
+    #[inline]
+    pub fn mutated(&self) -> NonNull<bool> {
+        unsafe { NonNull::new_unchecked(self.mutated_entities.as_ptr() as *mut bool) }
+    }
+
+    #[allow(missing_docs)]
+    #[inline]
+    pub fn added(&self) -> NonNull<bool> {
+        unsafe { NonNull::new_unchecked(self.added_entities.as_ptr() as *mut bool) }
     }
 }
 

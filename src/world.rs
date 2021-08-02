@@ -49,6 +49,7 @@ pub struct World {
     /// Maps statically-typed bundle types to archetypes
     bundle_to_archetype: TypeIdMap<u32>,
     id: u64,
+    removed_components: HashMap<TypeId, Vec<Entity>>,
 }
 
 impl World {
@@ -63,6 +64,7 @@ impl World {
             id: ID
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                 .unwrap(),
+            removed_components: HashMap::default(),
         }
     }
 
@@ -150,7 +152,7 @@ impl World {
         unsafe {
             let index = archetype.allocate(entity.id);
             components.put(|ptr, ty| {
-                archetype.put_dynamic(ptr, ty.id(), ty.layout().size(), index);
+                archetype.put_dynamic(ptr, ty.id(), ty.layout().size(), index, true, false);
             });
             self.entities.meta[entity.id as usize].location = Location {
                 archetype: archetype_id,
@@ -285,10 +287,16 @@ impl World {
     pub fn despawn(&mut self, entity: Entity) -> Result<(), NoSuchEntity> {
         self.flush();
         let loc = self.entities.free(entity)?;
-        if let Some(moved) =
-            unsafe { self.archetypes.archetypes[loc.archetype as usize].remove(loc.index, true) }
-        {
+        let archetype = &mut self.archetypes.archetypes[loc.archetype as usize];
+        if let Some(moved) = unsafe { archetype.remove(loc.index, true) } {
             self.entities.meta[moved as usize].location.index = loc.index;
+        }
+        for ty in archetype.types() {
+            let removed_entities = self
+                .removed_components
+                .entry(ty.id())
+                .or_insert_with(Vec::new);
+            removed_entities.push(entity);
         }
         Ok(())
     }
@@ -318,8 +326,22 @@ impl World {
     ///
     /// Preserves allocated storage for reuse.
     pub fn clear(&mut self) {
-        for x in &mut self.archetypes.archetypes {
-            x.clear();
+        for archetype in &self.archetypes.archetypes {
+            for ty in archetype.types() {
+                let archetype_entities: Vec<Entity> = archetype
+                    .ids()
+                    .iter()
+                    .map(|id| unsafe { self.find_entity_from_id(*id) })
+                    .collect();
+                let removed_entities = self
+                    .removed_components
+                    .entry(ty.id())
+                    .or_insert_with(Vec::new);
+                removed_entities.extend(archetype_entities);
+            }
+        }
+        for archetype in &mut self.archetypes.archetypes {
+            archetype.clear();
         }
         self.entities.clear();
     }
@@ -414,7 +436,7 @@ impl World {
     /// let a = world.spawn((123, true, "abc"));
     /// // The returned query must outlive the borrow made by `get`
     /// let mut query = world.query_one::<(&mut i32, &bool)>(a).unwrap();
-    /// let (number, flag) = query.get().unwrap();
+    /// let (mut number, flag) = query.get().unwrap();
     /// if *flag { *number *= 2; }
     /// assert_eq!(*number, 246);
     /// ```
@@ -511,6 +533,13 @@ impl World {
         Iter::new(&self.archetypes.archetypes, &self.entities)
     }
 
+    #[allow(missing_docs)]
+    pub fn removed<C: Component>(&self) -> &[Entity] {
+        self.removed_components
+            .get(&TypeId::of::<C>())
+            .map_or(&[], |entities| entities.as_slice())
+    }
+
     /// Add `components` to `entity`
     ///
     /// Computational cost is proportional to the number of components `entity` has. If an entity
@@ -570,7 +599,7 @@ impl World {
                 // Update components in the current archetype
                 let arch = &mut self.archetypes.archetypes[loc.archetype as usize];
                 components.put(|ptr, ty| {
-                    arch.put_dynamic(ptr, ty.id(), ty.layout().size(), loc.index);
+                    arch.put_dynamic(ptr, ty.id(), ty.layout().size(), loc.index, false, true);
                 });
                 return Ok(());
             }
@@ -588,7 +617,15 @@ impl World {
 
             // Move the new components
             components.put(|ptr, ty| {
-                target_arch.put_dynamic(ptr, ty.id(), ty.layout().size(), target_index);
+                let had_component = source_arch.has_dynamic(ty.id());
+                target_arch.put_dynamic(
+                    ptr,
+                    ty.id(),
+                    ty.layout().size(),
+                    target_index,
+                    !had_component,
+                    had_component,
+                );
             });
 
             // Move the components we're keeping
@@ -596,7 +633,14 @@ impl World {
                 let src = source_arch
                     .get_dynamic(ty.id(), ty.layout().size(), old_index)
                     .unwrap();
-                target_arch.put_dynamic(src.as_ptr(), ty.id(), ty.layout().size(), target_index)
+                target_arch.put_dynamic(
+                    src.as_ptr(),
+                    ty.id(),
+                    ty.layout().size(),
+                    target_index,
+                    false,
+                    false,
+                )
             }
 
             // Free storage in the old archetype
@@ -682,12 +726,22 @@ impl World {
                 let target_index = target_arch.allocate(entity.id);
                 loc.archetype = target;
                 loc.index = target_index;
-                if let Some(moved) = source_arch.move_to(old_index, |src, ty, size| {
-                    // Only move the components present in the target archetype, i.e. the non-removed ones.
-                    if let Some(dst) = target_arch.get_dynamic(ty, size, target_index) {
-                        ptr::copy_nonoverlapping(src, dst.as_ptr(), size);
-                    }
-                }) {
+                let removed_components = &mut self.removed_components;
+                if let Some(moved) =
+                    source_arch.move_to(old_index, |src, ty, size, is_added, is_mutated| {
+                        // Only move the components present in the target archetype, i.e. the non-removed ones.
+                        if let Some(dst) = target_arch.get_dynamic(ty, size, target_index) {
+                            ptr::copy_nonoverlapping(src, dst.as_ptr(), size);
+                            let state = target_arch.get_type_state_mut(&ty).unwrap();
+                            *state.added().as_ptr().add(target_index as usize) = is_added;
+                            *state.mutated().as_ptr().add(target_index as usize) = is_mutated;
+                        } else {
+                            let removed_entities =
+                                removed_components.entry(ty).or_insert_with(Vec::new);
+                            removed_entities.push(entity);
+                        }
+                    })
+                {
                     self.entities.meta[moved as usize].location.index = old_index;
                 }
             }
@@ -789,6 +843,17 @@ impl World {
     /// ```
     pub fn archetypes_generation(&self) -> ArchetypesGeneration {
         ArchetypesGeneration(self.archetypes.generation)
+    }
+
+    /// Clears each entity's tracker state. For example, each entity's component "mutated" state will be reset to `false`.
+    pub fn clear_trackers<T: Component>(&mut self) {
+        for archetype in &mut self.archetypes.archetypes {
+            if let Some(type_state) = archetype.get_type_state_mut(&TypeId::of::<T>()) {
+                type_state.clear_trackers();
+            }
+        }
+
+        self.removed_components.clear();
     }
 
     /// Number of currently live entities
@@ -1016,7 +1081,7 @@ where
             let index = self.archetype.allocate(entity.id);
             components.put(|ptr, ty| {
                 self.archetype
-                    .put_dynamic(ptr, ty.id(), ty.layout().size(), index);
+                    .put_dynamic(ptr, ty.id(), ty.layout().size(), index, true, false);
             });
             self.entities.meta[entity.id as usize].location = Location {
                 archetype: self.archetype_id,

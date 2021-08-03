@@ -128,21 +128,14 @@ impl Archetype {
         }
     }
 
-    pub(crate) fn clear_trackers<T: Component>(&mut self) {
-        if let Some(state) = self.get_state::<T>() {
-            unsafe {
-                for mutated in self
-                    .data
-                    .get_unchecked_mut(state)
-                    .mutated_entities
-                    .iter_mut()
-                {
-                    *mutated = false;
-                }
-
-                for added in self.data.get_unchecked_mut(state).added_entities.iter_mut() {
-                    *added = false;
-                }
+    #[allow(missing_docs)]
+    pub(crate) fn clear_trackers(&mut self) {
+        for data in self.data.iter_mut() {
+            for mutated in data.mutated_entities.iter_mut() {
+                *mutated = false;
+            }
+            for added in data.added_entities.iter_mut() {
+                *added = false;
             }
         }
     }

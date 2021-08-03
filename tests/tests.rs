@@ -505,7 +505,7 @@ fn remove_tracking() {
         "removing a component results in a 'removed component' state"
     );
 
-    world.clear_trackers::<i32>();
+    world.clear_trackers();
     assert_eq!(
         world.removed::<i32>(),
         &[],

@@ -846,11 +846,9 @@ impl World {
     }
 
     /// Clears each entity's tracker state. For example, each entity's component "mutated" state will be reset to `false`.
-    pub fn clear_trackers<T: Component>(&mut self) {
+    pub fn clear_trackers(&mut self) {
         for archetype in &mut self.archetypes.archetypes {
-            if let Some(type_state) = archetype.get_type_state_mut(&TypeId::of::<T>()) {
-                type_state.clear_trackers();
-            }
+            archetype.clear_trackers();
         }
 
         self.removed_components.clear();

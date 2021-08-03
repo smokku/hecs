@@ -259,6 +259,13 @@ impl Archetype {
         self.entities.len() as u32
     }
 
+    #[allow(missing_docs)]
+    pub fn clear_trackers(&mut self) {
+        for (_id, type_state) in self.state.0.iter_mut() {
+            type_state.clear_trackers();
+        }
+    }
+
     /// Increase capacity by at least `min_increment`
     fn grow(&mut self, min_increment: u32) {
         // Double capacity or increase it by `min_increment`, whichever is larger.

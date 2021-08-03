@@ -5,7 +5,7 @@ use crate::{Access, Archetype, Component, Fetch, Query};
 /// Query that retrieves mutation state of type `T` component.
 /// Added components do not count as mutated.
 ///
-/// It is your responsibility to clear trackers with [`World::clear_trackers::<T>()`](crate::World::clear_trackers::<T>())
+/// It is your responsibility to clear trackers with [`World::clear_trackers()`](crate::World::clear_trackers())
 /// at the start of the frame (or any other suitable moment).
 ///
 /// # Example
@@ -24,7 +24,7 @@ use crate::{Access, Archetype, Component, Fetch, Query};
 ///   assert_eq!(*value, 42, "!3");
 ///   assert_eq!(value_mut, true, "!3a");
 /// }
-/// world.clear_trackers::<i32>();
+/// world.clear_trackers();
 /// for (_id, value_mut) in world.query::<Mutated<i32>>().iter() {
 ///   assert_eq!(value_mut, false, "!4");
 /// }
@@ -75,7 +75,7 @@ unsafe impl<'a, T: Component> Fetch<'a> for FetchMutated<T> {
 
 /// Query that retrieves added state of type `T` component.
 ///
-/// It is your responsibility to clear trackers with [`World::clear_trackers::<T>()`](crate::World::clear_trackers::<T>())
+/// It is your responsibility to clear trackers with [`World::clear_trackers()`](crate::World::clear_trackers())
 /// at the start of the frame (or any other suitable moment).
 ///
 /// # Example
@@ -87,7 +87,7 @@ unsafe impl<'a, T: Component> Fetch<'a> for FetchMutated<T> {
 ///   assert_eq!(*value, 123);
 ///   assert_eq!(value_add, true);
 /// }
-/// world.clear_trackers::<i32>();
+/// world.clear_trackers();
 /// for (_id, value_add) in world.query::<Added<i32>>().iter() {
 ///   assert_eq!(value_add, false);
 /// }
@@ -139,7 +139,7 @@ unsafe impl<'a, T: Component> Fetch<'a> for FetchAdded<T> {
 /// Query that retrieves changed state of type `T` component.
 /// Changed component is one that have either been mutated or added.
 ///
-/// It is your responsibility to clear trackers with [`World::clear_trackers::<T>()`](crate::World::clear_trackers::<T>())
+/// It is your responsibility to clear trackers with [`World::clear_trackers()`](crate::World::clear_trackers())
 /// at the start of the frame (or any other suitable moment).
 ///
 /// # Example
@@ -151,7 +151,7 @@ unsafe impl<'a, T: Component> Fetch<'a> for FetchAdded<T> {
 ///   assert_eq!(*value, 123);
 ///   assert_eq!(value_ch, true);
 /// }
-/// world.clear_trackers::<i32>();
+/// world.clear_trackers();
 /// for (_id, value_ch) in world.query::<Changed<i32>>().iter() {
 ///   assert_eq!(value_ch, false);
 /// }
@@ -162,7 +162,7 @@ unsafe impl<'a, T: Component> Fetch<'a> for FetchAdded<T> {
 ///   assert_eq!(*value, 42);
 ///   assert_eq!(value_ch, true);
 /// }
-/// world.clear_trackers::<i32>();
+/// world.clear_trackers();
 /// for (_id, value_ch) in world.query::<Changed<i32>>().iter() {
 ///   assert_eq!(value_ch, false);
 /// }

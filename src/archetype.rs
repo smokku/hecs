@@ -284,6 +284,10 @@ impl Archetype {
             let old_data_size = mem::replace(&mut self.data_size, 0);
             let mut new_state = OrderedTypeIdMap::new(self.types.iter().map(|ty| {
                 let mut type_state = TypeState::new(0);
+                if let Some(old_type_state) = self.state.get(&ty.id) {
+                    type_state.mutated_entities = old_type_state.mutated_entities.clone();
+                    type_state.added_entities = old_type_state.added_entities.clone();
+                }
                 type_state.mutated_entities.resize_with(new_cap, || false);
                 type_state.added_entities.resize_with(new_cap, || false);
                 (ty.id, type_state)
